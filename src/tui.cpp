@@ -609,7 +609,7 @@ void render(
     std::size_t& scrollOffset) {
     const std::size_t width = terminal.columns;
     const std::size_t bottomRows = 5;
-    const std::size_t baseHeaderRows = 4;
+    const std::size_t baseHeaderRows = 3;
     const std::size_t availableDeviceRows = terminal.rows > bottomRows + baseHeaderRows + 1
                                                 ? terminal.rows - bottomRows - baseHeaderRows - 1
                                                 : 2;
@@ -624,13 +624,6 @@ void render(
     const bool dimBackground = editor.open;
     std::ostringstream output;
     output << "\x1b[H";
-    if (dimBackground) {
-        output << "\x1b[2;48;5;234m\x1b[2;36;48;5;234m";
-    } else {
-        output << "\x1b[1;36m";
-    }
-    appendLine(output, "CUDA 圆周率计算器（仅使用 CUDA，不使用 CPU 回退）", width);
-    output << "\x1b[0m";
     if (dimBackground) {
         output << "\x1b[2;48;5;234m";
     }
