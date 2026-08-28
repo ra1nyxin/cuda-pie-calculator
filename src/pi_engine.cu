@@ -454,7 +454,7 @@ bool PiEngine::startExact(unsigned digits) {
     if (digits < kMinimumDigits || digits > kMaximumDigits) {
         JobSnapshot failed = snapshot();
         failed.state = JobState::Failed;
-        failed.message = "请求精度超出支持范围：小数点后 10 到 21 亿位。";
+        failed.message = "请求精度超出支持范围：小数点后 10 到 2,147,483,647 位。";
         setSnapshot(failed);
         return false;
     }
