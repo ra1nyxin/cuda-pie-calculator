@@ -403,6 +403,28 @@ std::string formatDigitRate(unsigned digits, double milliseconds) {
     return output.str();
 }
 
+unsigned precisionStep(unsigned digits) {
+    if (digits <= 10'000U) {
+        return 100U;
+    }
+    if (digits < 100'000U) {
+        return 1'000U;
+    }
+    if (digits < 1'000'000U) {
+        return 10'000U;
+    }
+    if (digits < 10'000'000U) {
+        return 100'000U;
+    }
+    if (digits < 100'000'000U) {
+        return 1'000'000U;
+    }
+    if (digits < 1'000'000'000U) {
+        return 10'000'000U;
+    }
+    return 100'000'000U;
+}
+
 std::string formatTheoreticalBandwidth(const GpuInfo& gpu) {
     if (gpu.memoryClockKHz <= 0 || gpu.memoryBusWidthBits <= 0) {
         return "未知";
@@ -602,7 +624,8 @@ int TerminalUi::run(PiEngine& engine) {
                 if (selectedMode == CalculationMode::MonteCarlo) {
                     selectedSamples = std::min<std::uint64_t>(kMaximumMonteCarloSamples, selectedSamples + 10'000'000ULL);
                 } else {
-                    selectedDigits = std::min(kMaximumDigits, selectedDigits + 100U);
+                    const unsigned step = precisionStep(selectedDigits);
+                    selectedDigits += std::min(step, kMaximumDigits - selectedDigits);
                 }
                 break;
             case Key::DecreasePrecision:
@@ -614,7 +637,8 @@ int TerminalUi::run(PiEngine& engine) {
                                           ? selectedSamples - 10'000'000ULL
                                           : kMinimumMonteCarloSamples;
                 } else {
-                    selectedDigits = std::max(kMinimumDigits, selectedDigits > 100U ? selectedDigits - 100U : kMinimumDigits);
+                    const unsigned step = precisionStep(selectedDigits);
+                    selectedDigits = selectedDigits > kMinimumDigits + step ? selectedDigits - step : kMinimumDigits;
                 }
                 break;
             case Key::ScrollUp:

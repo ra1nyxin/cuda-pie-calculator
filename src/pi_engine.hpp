@@ -13,7 +13,7 @@
 namespace pie {
 
 inline constexpr unsigned kMinimumDigits = 10;
-inline constexpr unsigned kMaximumDigits = 10000;
+inline constexpr unsigned kMaximumDigits = 2'100'000'000U;
 inline constexpr unsigned kDefaultDigits = 10000;
 inline constexpr std::uint64_t kMinimumMonteCarloSamples = 1'000'000ULL;
 inline constexpr std::uint64_t kMaximumMonteCarloSamples = 4'000'000'000ULL;
