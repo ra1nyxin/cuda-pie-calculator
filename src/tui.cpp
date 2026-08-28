@@ -3,9 +3,11 @@
 #include "resources.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -39,12 +41,27 @@ enum class Key {
     Cancel,
     Quit,
     ToggleMode,
-    IncreasePrecision,
-    DecreasePrecision,
+    EditTarget,
+    ConfirmInput,
+    DismissInput,
+    Backspace,
+    DigitInput,
     ScrollUp,
     ScrollDown,
     PreviousDevice,
     NextDevice,
+};
+
+struct KeyEvent {
+    Key key = Key::None;
+    char character = '\0';
+};
+
+struct TargetEditor {
+    bool open = false;
+    CalculationMode mode = CalculationMode::ExactDigits;
+    std::string input;
+    std::string error;
 };
 
 struct TerminalSize {
@@ -131,7 +148,7 @@ public:
         return result;
     }
 
-    Key pollKey() {
+    KeyEvent pollKey() {
 #if defined(_WIN32)
         INPUT_RECORD record{};
         DWORD pending = 0;
@@ -144,46 +161,70 @@ public:
                 continue;
             }
             const WORD virtualKey = record.Event.KeyEvent.wVirtualKeyCode;
-            if (virtualKey == VK_UP) return Key::ScrollUp;
-            if (virtualKey == VK_DOWN) return Key::ScrollDown;
+            if (virtualKey == VK_UP) return {Key::ScrollUp};
+            if (virtualKey == VK_DOWN) return {Key::ScrollDown};
             const wchar_t character = record.Event.KeyEvent.uChar.UnicodeChar;
             return mapCharacter(static_cast<char>(character));
         }
 #else
+        if (!pendingEvents_.empty()) {
+            const KeyEvent event = pendingEvents_.front();
+            pendingEvents_.pop_front();
+            return event;
+        }
         char input[32]{};
         const ssize_t count = read(STDIN_FILENO, input, sizeof(input));
         if (count <= 0) {
-            return Key::None;
+            return {};
         }
         for (ssize_t index = 0; index < count; ++index) {
             if (input[index] == '\x1b' && index + 2 < count && input[index + 1] == '[') {
-                if (input[index + 2] == 'A') return Key::ScrollUp;
-                if (input[index + 2] == 'B') return Key::ScrollDown;
+                if (input[index + 2] == 'A') {
+                    pendingEvents_.push_back({Key::ScrollUp});
+                    index += 2;
+                    continue;
+                }
+                if (input[index + 2] == 'B') {
+                    pendingEvents_.push_back({Key::ScrollDown});
+                    index += 2;
+                    continue;
+                }
             }
-            const Key key = mapCharacter(input[index]);
-            if (key != Key::None) {
-                return key;
+            const KeyEvent event = mapCharacter(input[index]);
+            if (event.key != Key::None) {
+                pendingEvents_.push_back(event);
             }
         }
+        if (!pendingEvents_.empty()) {
+            const KeyEvent event = pendingEvents_.front();
+            pendingEvents_.pop_front();
+            return event;
+        }
 #endif
-        return Key::None;
+        return {};
     }
 
 private:
-    static Key mapCharacter(char character) {
+    static KeyEvent mapCharacter(char character) {
         switch (character) {
-            case 's': case 'S': return Key::Start;
-            case 'p': case 'P': return Key::Pause;
-            case 'c': case 'C': return Key::Cancel;
-            case 'm': case 'M': return Key::ToggleMode;
-            case 'q': case 'Q': return Key::Quit;
-            case '+': case '=': return Key::IncreasePrecision;
-            case '-': case '_': return Key::DecreasePrecision;
-            case 'k': case 'K': return Key::ScrollUp;
-            case 'j': case 'J': return Key::ScrollDown;
-            case '[': return Key::PreviousDevice;
-            case ']': return Key::NextDevice;
-            default: return Key::None;
+            case 's': case 'S': return {Key::Start};
+            case 'p': case 'P': return {Key::Pause};
+            case 'c': case 'C': return {Key::Cancel};
+            case 'm': case 'M': return {Key::ToggleMode};
+            case 'q': case 'Q': return {Key::Quit};
+            case 'e': case 'E': return {Key::EditTarget};
+            case '\r': case '\n': return {Key::ConfirmInput};
+            case '\x1b': return {Key::DismissInput};
+            case '\b': case '\x7f': return {Key::Backspace};
+            case 'k': case 'K': return {Key::ScrollUp};
+            case 'j': case 'J': return {Key::ScrollDown};
+            case '[': return {Key::PreviousDevice};
+            case ']': return {Key::NextDevice};
+            default:
+                if (character >= '0' && character <= '9') {
+                    return {Key::DigitInput, character};
+                }
+                return {};
         }
     }
 
@@ -196,6 +237,7 @@ private:
 #else
     termios oldAttributes_{};
     int oldInputFlags_ = -1;
+    std::deque<KeyEvent> pendingEvents_;
 #endif
 };
 
@@ -389,6 +431,100 @@ std::string formatSampleRate(double samplesPerSecond) {
     return formatSampleCount(static_cast<std::uint64_t>(samplesPerSecond)) + "样本/秒";
 }
 
+std::string formatInteger(std::uint64_t value) {
+    std::string text = std::to_string(value);
+    for (std::size_t position = text.size(); position > 3; position -= 3) {
+        text.insert(position - 3, 1, ',');
+    }
+    return text;
+}
+
+std::string editorTitle(CalculationMode mode) {
+    return mode == CalculationMode::MonteCarlo ? "设置蒙特卡洛样本目标" : "设置精确目标位数";
+}
+
+std::string editorRange(CalculationMode mode) {
+    if (mode == CalculationMode::MonteCarlo) {
+        return "可输入范围：" + formatInteger(kMinimumMonteCarloSamples) + " 到 " + formatInteger(kMaximumMonteCarloSamples) + " 样本";
+    }
+    return "可输入范围：" + formatInteger(kMinimumDigits) + " 到 " + formatInteger(kMaximumDigits) + " 位";
+}
+
+std::string editorCurrentValue(CalculationMode mode, unsigned digits, std::uint64_t samples) {
+    if (mode == CalculationMode::MonteCarlo) {
+        return "当前目标：" + formatInteger(samples) + " 样本";
+    }
+    return "当前目标：" + formatInteger(digits) + " 位";
+}
+
+bool commitTargetEditor(TargetEditor& editor, unsigned& digits, std::uint64_t& samples) {
+    if (editor.input.empty()) {
+        editor.error = "请输入一个十进制整数。";
+        return false;
+    }
+
+    std::uint64_t value = 0;
+    const auto [end, error] = std::from_chars(editor.input.data(), editor.input.data() + editor.input.size(), value);
+    if (error != std::errc{} || end != editor.input.data() + editor.input.size()) {
+        editor.error = "输入值无效，请只输入十进制数字。";
+        return false;
+    }
+
+    if (editor.mode == CalculationMode::MonteCarlo) {
+        if (value < kMinimumMonteCarloSamples || value > kMaximumMonteCarloSamples) {
+            editor.error = "样本目标超出允许范围。";
+            return false;
+        }
+        samples = value;
+    } else {
+        if (value < kMinimumDigits || value > kMaximumDigits) {
+            editor.error = "精确位数超出允许范围。";
+            return false;
+        }
+        digits = static_cast<unsigned>(value);
+    }
+    editor.open = false;
+    return true;
+}
+
+void renderEditorLine(
+    std::ostringstream& output,
+    std::size_t row,
+    std::size_t column,
+    std::size_t innerWidth,
+    const std::string& text) {
+    const std::string visible = crop(text, innerWidth);
+    output << "\x1b[" << row << ';' << column << "H\x1b[97;48;5;238m|" << visible;
+    const std::size_t visibleWidth = displayWidth(visible);
+    if (visibleWidth < innerWidth) {
+        output << std::string(innerWidth - visibleWidth, ' ');
+    }
+    output << "|\x1b[0m";
+}
+
+void renderTargetEditor(
+    std::ostringstream& output,
+    const TerminalSize& terminal,
+    const TargetEditor& editor,
+    unsigned selectedDigits,
+    std::uint64_t selectedSamples) {
+    const std::size_t modalWidth = std::min<std::size_t>(74, terminal.columns - 4);
+    const std::size_t innerWidth = modalWidth - 2;
+    const std::size_t modalHeight = 8;
+    const std::size_t top = std::max<std::size_t>(1, (terminal.rows - modalHeight) / 2 + 1);
+    const std::size_t left = std::max<std::size_t>(1, (terminal.columns - modalWidth) / 2 + 1);
+    const std::string border = "+" + std::string(innerWidth, '-') + "+";
+
+    output << "\x1b[" << top << ';' << left << "H\x1b[1;96;48;5;238m" << border << "\x1b[0m";
+    renderEditorLine(output, top + 1, left, innerWidth, editorTitle(editor.mode));
+    renderEditorLine(output, top + 2, left, innerWidth, editorRange(editor.mode));
+    renderEditorLine(output, top + 3, left, innerWidth, editorCurrentValue(editor.mode, selectedDigits, selectedSamples));
+    renderEditorLine(output, top + 4, left, innerWidth, "输入：" + editor.input + "_");
+    renderEditorLine(output, top + 5, left, innerWidth, editor.error.empty() ? "仅可输入十进制数字。" : editor.error);
+    renderEditorLine(output, top + 6, left, innerWidth, "Enter 确认   Esc 取消");
+    output << "\x1b[" << (top + 7) << ';' << left << "H\x1b[1;96;48;5;238m" << border << "\x1b[0m";
+}
+
 std::string formatDigitRate(unsigned digits, double milliseconds) {
     if (milliseconds <= 0.0) {
         return "暂无";
@@ -401,28 +537,6 @@ std::string formatDigitRate(unsigned digits, double milliseconds) {
         output << std::fixed << std::setprecision(1) << digitsPerSecond << "位/秒";
     }
     return output.str();
-}
-
-unsigned precisionStep(unsigned digits) {
-    if (digits <= 10'000U) {
-        return 100U;
-    }
-    if (digits < 100'000U) {
-        return 1'000U;
-    }
-    if (digits < 1'000'000U) {
-        return 10'000U;
-    }
-    if (digits < 10'000'000U) {
-        return 100'000U;
-    }
-    if (digits < 100'000'000U) {
-        return 1'000'000U;
-    }
-    if (digits < 1'000'000'000U) {
-        return 10'000'000U;
-    }
-    return 100'000'000U;
 }
 
 std::string formatTheoreticalBandwidth(const GpuInfo& gpu) {
@@ -491,6 +605,7 @@ void render(
     CalculationMode selectedMode,
     unsigned selectedDigits,
     std::uint64_t selectedSamples,
+    const TargetEditor& editor,
     std::size_t& scrollOffset) {
     const std::size_t width = terminal.columns;
     const std::size_t bottomRows = 5;
@@ -506,10 +621,19 @@ void render(
     const std::size_t maxScroll = lines.size() > middleRows ? lines.size() - middleRows : 0;
     scrollOffset = std::min(scrollOffset, maxScroll);
 
+    const bool dimBackground = editor.open;
     std::ostringstream output;
-    output << "\x1b[H\x1b[1;36m";
+    output << "\x1b[H";
+    if (dimBackground) {
+        output << "\x1b[2;48;5;234m\x1b[2;36;48;5;234m";
+    } else {
+        output << "\x1b[1;36m";
+    }
     appendLine(output, "CUDA 圆周率计算器（仅使用 CUDA，不使用 CPU 回退）", width);
     output << "\x1b[0m";
+    if (dimBackground) {
+        output << "\x1b[2;48;5;234m";
+    }
 
     std::ostringstream deviceHeading;
     deviceHeading << "CUDA 设备（共 " << devices.size() << " 块，显示 " << (firstDeviceSlot + 1) << '-'
@@ -565,7 +689,7 @@ void render(
     appendLine(output, gpuLoadLine(resources), width);
     const GpuInfo& selectedGpu = devices[selectedDeviceSlot].gpu;
     if (selectedGpu.available) {
-        appendLine(output, "按键：s 开始  m 模式  [ / ] 显卡  p 暂停  c 取消  +/- 目标  j/k 滚动  q 退出", width);
+        appendLine(output, "按键：s 开始  e 目标  m 模式  [ / ] 显卡  p 暂停  c 取消  j/k 滚动  q 退出", width);
     } else {
         appendLine(output, "当前 GPU 不可用：s 已禁用，q 退出", width);
     }
@@ -575,6 +699,10 @@ void render(
         appendLine(output, timing.str(), width, false);
     } else {
         appendLine(output, job.message, width, false);
+    }
+    if (dimBackground) {
+        output << "\x1b[0m";
+        renderTargetEditor(output, terminal, editor, selectedDigits, selectedSamples);
     }
 
     std::cout << output.str() << std::flush;
@@ -589,12 +717,39 @@ int TerminalUi::run(PiEngine& engine) {
     CalculationMode selectedMode = CalculationMode::ExactDigits;
     unsigned selectedDigits = kDefaultDigits;
     std::uint64_t selectedSamples = 100'000'000ULL;
+    TargetEditor editor;
     std::size_t scrollOffset = 0;
     bool running = true;
 
     while (running) {
-        const Key key = terminal.pollKey();
-        switch (key) {
+        const KeyEvent event = terminal.pollKey();
+        if (editor.open) {
+            switch (event.key) {
+                case Key::DigitInput:
+                    if (editor.input.size() < 10) {
+                        editor.input.push_back(event.character);
+                        editor.error.clear();
+                    }
+                    break;
+                case Key::Backspace:
+                    if (!editor.input.empty()) {
+                        editor.input.pop_back();
+                        editor.error.clear();
+                    }
+                    break;
+                case Key::ConfirmInput:
+                    if (commitTargetEditor(editor, selectedDigits, selectedSamples)) {
+                        scrollOffset = 0;
+                    }
+                    break;
+                case Key::DismissInput:
+                    editor.open = false;
+                    break;
+                default:
+                    break;
+            }
+        } else {
+            switch (event.key) {
             case Key::Start:
                 if (selectedMode == CalculationMode::MonteCarlo) {
                     engine.startMonteCarlo(selectedSamples);
@@ -617,29 +772,14 @@ int TerminalUi::run(PiEngine& engine) {
             case Key::Cancel:
                 engine.cancel();
                 break;
-            case Key::IncreasePrecision:
+            case Key::EditTarget:
                 if (jobIsActive(engine.snapshot().state)) {
                     break;
                 }
-                if (selectedMode == CalculationMode::MonteCarlo) {
-                    selectedSamples = std::min<std::uint64_t>(kMaximumMonteCarloSamples, selectedSamples + 10'000'000ULL);
-                } else {
-                    const unsigned step = precisionStep(selectedDigits);
-                    selectedDigits += std::min(step, kMaximumDigits - selectedDigits);
-                }
-                break;
-            case Key::DecreasePrecision:
-                if (jobIsActive(engine.snapshot().state)) {
-                    break;
-                }
-                if (selectedMode == CalculationMode::MonteCarlo) {
-                    selectedSamples = selectedSamples > kMinimumMonteCarloSamples + 10'000'000ULL
-                                          ? selectedSamples - 10'000'000ULL
-                                          : kMinimumMonteCarloSamples;
-                } else {
-                    const unsigned step = precisionStep(selectedDigits);
-                    selectedDigits = selectedDigits > kMinimumDigits + step ? selectedDigits - step : kMinimumDigits;
-                }
+                editor.open = true;
+                editor.mode = selectedMode;
+                editor.input.clear();
+                editor.error.clear();
                 break;
             case Key::ScrollUp:
                 scrollOffset = scrollOffset == 0 ? 0 : scrollOffset - 1;
@@ -653,7 +793,7 @@ int TerminalUi::run(PiEngine& engine) {
                 const std::vector<DeviceSnapshot> devices = engine.devices();
                 if (!jobIsActive(currentJob.state) && devices.size() > 1) {
                     const std::size_t currentSlot = engine.selectedDeviceSlot();
-                    const std::size_t nextSlot = key == Key::PreviousDevice
+                    const std::size_t nextSlot = event.key == Key::PreviousDevice
                                                      ? (currentSlot == 0 ? devices.size() - 1 : currentSlot - 1)
                                                      : (currentSlot + 1) % devices.size();
                     if (engine.selectDevice(nextSlot)) {
@@ -667,7 +807,12 @@ int TerminalUi::run(PiEngine& engine) {
                 running = false;
                 break;
             case Key::None:
+            case Key::ConfirmInput:
+            case Key::DismissInput:
+            case Key::Backspace:
+            case Key::DigitInput:
                 break;
+            }
         }
 
         const std::size_t selectedDeviceSlot = engine.selectedDeviceSlot();
@@ -685,6 +830,7 @@ int TerminalUi::run(PiEngine& engine) {
             selectedMode,
             selectedDigits,
             selectedSamples,
+            editor,
             scrollOffset);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
